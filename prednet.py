@@ -14,7 +14,8 @@ PLOT = True
 TEST = False
 is_train = True
 control = True             # if control = True, ff and fb weight are transposed;
-ifLSTM = False
+ifLSTM = True
+ifGlobalLSTM = False       # if True, the state of LSTM will be across the global "cycle"
 error_factor = 0.3
 
 #####################   get input (change to img series in future)  ######################
@@ -29,7 +30,7 @@ test_labels = mnist.test.labels
 batch_size = 20
 test_batch_size = 20
 learning_rate = 0.001
-generations = 500
+generations = 5000
 interval = 10
 image_width = train_xdata[0].shape[0]
 image_height = train_xdata[0].shape[1]
@@ -39,7 +40,10 @@ target_size = np.max(train_labels) + 1
 y_target = tf.placeholder(tf.int32, shape=(batch_size))
 
 level_num = 3
+convLSTM_cycle = 3
 cycle_num = 4
+#convLSTM_cycle = 1
+#cycle_num = 12
 conv_features = [20, 40, 60]
 
 conv1_weight = tf.Variable(tf.truncated_normal([3, 3, channel_num, conv_features[0]], stddev=0.1, dtype=tf.float32))
@@ -88,7 +92,6 @@ fb_bias = [fb1_bias, fb2_bias]
 
 class prednet:
     def __init__(self, input):
-        
         e0_0 = tf.zeros(shape=input_shape, dtype=tf.float32)
         e0_1 = tf.zeros(shape=[batch_size, 14, 14, conv_features[0]], dtype=tf.float32)
         e0_2 = tf.zeros(shape=[batch_size, 7, 7, conv_features[1]], dtype=tf.float32)
@@ -96,87 +99,96 @@ class prednet:
         r0_1 = tf.zeros(shape=[batch_size, 14, 14, conv_features[0]], dtype=tf.float32)
         r0_2 = tf.zeros(shape=[batch_size, 7, 7, conv_features[1]], dtype=tf.float32)
 
-        self.error = [ [e0_0, e0_1, e0_2], [] ]
-        self.represent = [ [r0_0, r0_1, r0_2], [] ]
+        self.input = input
+        self.error = [ [e0_0, e0_1, e0_2] ]             # [time_0_all_level], [time_1_all_level]
+        self.represent = [ [r0_0, r0_1, r0_2] ]
         self.a_bar = []
-        self.a = [input]
+        self.a = []
 
-        for l in reversed(range(level_num)):
-            if ifLSTM:
-                tmp = 0
-                output_channels = 0
+        prevState = [[] for i in range(level_num)]
+        for time in range(cycle_num):
+            for l in reversed(range(level_num)):
+                if ifLSTM:
+                    tmp = 0
+                    output_channels = 0
 
-                if l==level_num-1:
-                    tmp = tf.concat([self.error[0][l], self.represent[0][l]], 3)
-                    output_channels = conv_features[l-1]
-                else:
-                    up = tf.nn.conv2d_transpose(self.represent[1][0], fb_weight[l], self.error[0][l].get_shape().as_list(), strides=[1, 2, 2, 1], padding='SAME')
-                    upsample = tf.layers.batch_normalization(tf.nn.relu(tf.nn.bias_add(up, fb_bias[l])), training=is_train)
-                    tmp = tf.concat([self.error[0][l], self.represent[0][l], upsample], 3)
-                    if l==0:
-                        output_channels = channel_num
-                    else:
+                    if l==level_num-1:
+                        tmp = tf.concat([self.error[time][l], self.represent[time][l]], 3)
                         output_channels = conv_features[l-1]
+                        self.represent.append([])
+                    else:
+                        up = tf.nn.conv2d_transpose(self.represent[-1][0], fb_weight[l], self.error[time][l].get_shape().as_list(), strides=[1, 2, 2, 1], padding='SAME')
+                        upsample = tf.layers.batch_normalization(tf.nn.relu(tf.nn.bias_add(up, fb_bias[l])), training=is_train)
+                        tmp = tf.concat([self.error[time][l], self.represent[time][l], upsample], 3)
+                        if l==0:
+                            output_channels = channel_num
+                        else:
+                            output_channels = conv_features[l-1]
 
+                    if ifGlobalLSTM is False:
+                        prevState[l] = []
+                    final_lstm_output = 0
 
-                prevState = []
-                final_lstm_output = 0
+                    for t in range(convLSTM_cycle):
+                        with tf.variable_scope("convLSTM"+"_level"+str(l)+"_"+str(time)+'_recur_'+str(t)):
+                            cell = tf.contrib.rnn.ConvLSTMCell(conv_ndims=2, input_shape=tmp.get_shape().as_list()[1:], output_channels=output_channels, kernel_shape=[3, 3])
+                            #if t==0:
+                            if len(prevState[l])==0:
+                                prevState[l].append(cell.zero_state(batch_size=batch_size, dtype=tf.float32))
+                            output, final_state = cell.call(inputs=tmp, state=prevState[l][-1])
+                            prevState[l].append(final_state)
 
-                for t in range(cycle_num):
-                    with tf.variable_scope("convLSTM"+"_"+str(l)+"_"+str(t)):
-                        cell = tf.contrib.rnn.ConvLSTMCell(conv_ndims=2, input_shape=tmp.get_shape().as_list()[1:], output_channels=output_channels, kernel_shape=[3, 3])
-                        if t==0:
-                            prevState.append(cell.zero_state(batch_size=batch_size, dtype=tf.float32))
+                            if t == convLSTM_cycle-1:
+                                final_lstm_output = output
 
-                        output, final_state = cell.call(inputs=tmp, state=prevState[-1])
-                        prevState.append(final_state)
+                        #output, final_state = tf.nn.dynamic_rnn(cell, inputtt, dtype=tf.float32, time_major=False, initial_state=initial_state)
 
-                        if t == cycle_num-1:
-                            final_lstm_output = output
+                    self.represent[-1].insert(0, tf.layers.batch_normalization(final_lstm_output, training=is_train))
 
-                    #output, final_state = tf.nn.dynamic_rnn(cell, inputtt, dtype=tf.float32, time_major=False, initial_state=initial_state)
+                elif l == level_num-1:
+                    tmp = tf.concat([self.error[time][l], self.represent[time][l]], 3)
+                    tmp2 = tf.nn.relu(tf.nn.bias_add(tf.nn.conv2d(tmp, conv_lstm[l], strides=[1, 1, 1, 1], padding='SAME'), conv_lstm_bias[l]))
+                    self.represent.append([tf.layers.batch_normalization(tmp2, training=is_train)])
 
-                self.represent[1].insert(0, tf.layers.batch_normalization(output, training=is_train))
+                else:
+                    # upsample from higher level
+                    up = tf.nn.conv2d_transpose(self.represent[-1][0], fb_weight[l], self.error[time][l].get_shape().as_list(), strides=[1, 2, 2, 1], padding='SAME')
+                    upsample = tf.layers.batch_normalization(tf.nn.relu(tf.nn.bias_add(up, fb_bias[l])), training=is_train)
+                    tmp = tf.concat([self.error[time][l], self.represent[time][l], upsample], 3)
+                    tmp1 = tf.nn.relu(tf.nn.bias_add(tf.nn.conv2d(tmp, conv_lstm[l], strides=[1, 1, 1, 1], padding='SAME'), conv_lstm_bias[l]))
+                    self.represent[-1].insert(0, tf.layers.batch_normalization(tmp1, training=is_train))
 
+            for l in range(level_num):
+                if l == 0:
+                    tmp = tf.nn.conv2d(self.represent[-1][l], conv_abar_weight[l], strides=[1, 1, 1, 1], padding='SAME')
+                    tmp1 = tf.nn.relu(tf.nn.bias_add(tmp, conv_abar_bias[l]), name='level0_pred_'+str(time))
+                    tmp2 = tf.layers.batch_normalization(tmp1, training=is_train)
+                    self.a_bar.append([tmp2])
+                    if time==0:
+                        tmp3 = tf.layers.batch_normalization(self.input, training=is_train, name='normalized_image_input')
+                    else:
+                        tmp3 = self.a[0][0]
+                    self.a.append([tmp3])
+                    self.error.append([])
+                else:
+                    tmp = tf.nn.conv2d(self.represent[-1][l], conv_abar_weight[l], strides=[1, 1, 1, 1], padding='SAME')
+                    tmp1 = tf.nn.relu(tf.nn.bias_add(tmp, conv_abar_bias[l]), name='level'+str(l)+'_pred_'+str(time))
+                    tmp2 = tf.layers.batch_normalization(tmp1, training=is_train)
+                    self.a_bar[-1].append(tmp2)
 
-            elif l == level_num-1:
-                tmp = tf.concat([self.error[0][l], self.represent[0][l]], 3)
-                tmp2 = tf.nn.relu(tf.nn.bias_add(tf.nn.conv2d(tmp, conv_lstm[l], strides=[1, 1, 1, 1], padding='SAME'), conv_lstm_bias[l]))
-                self.represent[1].append(tf.layers.batch_normalization(tmp2, training=is_train))
-            else:
-                # upsample from higher level
-                up = tf.nn.conv2d_transpose(self.represent[1][0], fb_weight[l], self.error[0][l].get_shape().as_list(), strides=[1, 2, 2, 1], padding='SAME')
-                upsample = tf.layers.batch_normalization(tf.nn.relu(tf.nn.bias_add(up, fb_bias[l])), training=is_train)
-                tmp = tf.concat([self.error[0][l], self.represent[0][l], upsample], 3)
-                tmp1 = tf.nn.relu(tf.nn.bias_add(tf.nn.conv2d(tmp, conv_lstm[l], strides=[1, 1, 1, 1], padding='SAME'), conv_lstm_bias[l]))
-                self.represent[1].insert(0, tf.layers.batch_normalization(tmp1, training=is_train))
+                err = tf.subtract(self.a_bar[-1][-1],self.a[-1][-1], name='level'+str(l)+'_error_'+str(time))
+                #self.error[-1].append(tf.nn.relu(err, name='level'+str(l)+'_error_relu'+str(time)))
+                self.error[-1].append(tf.layers.batch_normalization(err, name='level'+str(l)+'_error_norm'+str(time)))
 
-
-        for l in range(level_num):
-            if l == 0:
-                tmp = tf.nn.conv2d(self.represent[1][l], conv_abar_weight[l], strides=[1, 1, 1, 1], padding='SAME')
-                tmp1 = tf.nn.relu(tf.nn.bias_add(tmp, conv_abar_bias[l]), name='level_0_pred')
-                tmp2 = tf.layers.batch_normalization(tmp1, training=is_train)
-                self.a_bar.append(tmp2)
-                tmp3 = tf.layers.batch_normalization(self.a[-1], training=is_train, name='normalized_image_input')
-                self.a.append(tmp3)
-            else:
-                tmp = tf.nn.conv2d(self.represent[1][l], conv_abar_weight[l], strides=[1, 1, 1, 1], padding='SAME')
-                tmp1 = tf.nn.relu(tf.nn.bias_add(tmp, conv_abar_bias[l]), name='level_'+str(l)+'_pred')
-                tmp2 = tf.layers.batch_normalization(tmp1, training=is_train)
-                self.a_bar.append(tmp2)
-
-            self.error[1].append(tf.nn.relu(self.a_bar[-1]-self.a[-1], name='level_'+str(l)+'_error'))
-
-            if l < (level_num-1):
-                tmp1 = tf.nn.conv2d(self.error[1][-1], conv_weight[l], strides=[1, 1, 1, 1], padding='SAME')
-                tmp2 = tf.nn.relu(tf.nn.bias_add(tmp1, conv_bias[l]))
-                tmp3 = tf.nn.max_pool(tmp2, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME', name='level_'+str(l+1)+'_input')
-                self.a.append(tf.layers.batch_normalization(tmp3, training=is_train))
+                if l < (level_num-1):
+                    tmp1 = tf.nn.conv2d(self.error[-1][-1], conv_weight[l], strides=[1, 1, 1, 1], padding='SAME')
+                    tmp2 = tf.nn.relu(tf.nn.bias_add(tmp1, conv_bias[l]))
+                    tmp3 = tf.nn.max_pool(tmp2, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME', name='level'+str(l+1)+'_input_'+str(time+1))
+                    self.a[-1].append(tf.layers.batch_normalization(tmp3, training=is_train))
 
 
     def get_output(self):
-        tmp1 = tf.nn.conv2d(self.error[1][-1], conv_weight[2], strides=[1, 1, 1, 1], padding='SAME')
+        tmp1 = tf.nn.conv2d(self.error[-1][-1], conv_weight[2], strides=[1, 1, 1, 1], padding='SAME')
         tmp2 = tf.nn.relu(tf.nn.bias_add(tmp1, conv_bias[2]))
         tmp3 = tf.nn.max_pool(tmp2, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME')
         final_conv_shape = tmp3.get_shape().as_list()
@@ -192,10 +204,13 @@ class prednet:
 
     def get_level_error(self):
         error = 0
-        for level_error in self.error[1]:
-            z = tf.zeros_like(level_error, dtype=tf.float32)
-            sum = [level_error, z]
-            error = error + tf.reduce_mean(sum)
+        for time in range(1, cycle_num):
+            for level_error in self.error[time]:
+                err_square = tf.pow(level_error, 2)
+                z = tf.zeros_like(level_error, dtype=tf.float32)
+                #sum = [level_error, z]
+                sum = [err_square, z]
+                error = error + tf.reduce_mean(sum)
 
         return error
 
@@ -234,7 +249,7 @@ for i in range(generations):
     rand_x = train_xdata[rand_index]
     rand_x = np.expand_dims(rand_x, 3)
     rand_y = train_labels[rand_index]
-    train_dict = {pcn_network.a[0]: rand_x, y_target: rand_y}
+    train_dict = {pcn_network.input: rand_x, y_target: rand_y}
     sess.run(train_step, feed_dict=train_dict)
     temp_train_loss = sess.run(loss, feed_dict=train_dict)
     #temp_train_los = sess.run(loss, feed_dict=train_dict)
@@ -249,8 +264,8 @@ for i in range(generations):
         train_prediction = sess.run(train_pred, feed_dict=train_dict)
         train_acc = get_accuracy(train_prediction, rand_y)
         temp_train_acc.append(train_acc)
-        if temp_train_loss < 0.01:
-            break
+        #if temp_train_loss < 0.01:
+        #    break
 
 #################       draw pic        ######################
 
