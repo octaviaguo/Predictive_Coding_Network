@@ -107,7 +107,7 @@ if ifLSTM and ifGlobalLSTM:
 new_lstm_state = []
 input_e = [input0e, input1e, input2e]
 input_r = [input0r, input1r, input2r]
-new_represent = []  # each time session run, will it be cleared to [] ?
+new_represent = []
 new_error = []
 img = tf.layers.batch_normalization(image_input, training=is_train, name='normalized_image_input')
 a = [img]
@@ -121,7 +121,9 @@ for l in reversed(range(level_num)):
         if l==level_num-1:
             tmp = tf.concat([input_r[l], input_e[l]], 3)
             output_channels = conv_features[l-1]
-            #new_represent.append([])
+            new_represent = []  # each time session run, will it be cleared to [] ?
+            new_error = []
+            new_lstm_state = []
         else:
             up = tf.nn.conv2d_transpose(input_r[l+1], fb_weight[l], input_e[l].get_shape().as_list(), strides=[1, 2, 2, 1], padding='SAME')
             upsample = tf.layers.batch_normalization(tf.nn.relu(tf.nn.bias_add(up, fb_bias[l])), training=is_train)
