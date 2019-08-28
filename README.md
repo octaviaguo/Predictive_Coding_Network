@@ -1,2 +1,2 @@
 # Predictive_Coding_Network
-Deep Predictive Coding Network
+This project implements algorithms in the following published papers: Deep Predictive Coding Network for Object Recognition (Wen H, Han K, Shi J, etc., 2018), Deep Predictive Coding Network with Local Recurrent Processing for Object Recognition (Han K, Wen H, Zhang Y, etc., 2018), Deep Predictive Coding Networks for Video Prediction and Unsupervised Learning (Lotter W, Kreiman G, Cox D, 2017).
